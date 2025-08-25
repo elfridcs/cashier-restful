@@ -2,19 +2,20 @@ use crate::delivery;
 
 use axum::{
     Router,
-    body::Bytes,
-    extract::State,
+    body::{Body, Bytes},
+    extract::{Request, State},
     http::header,
+    response::Response,
     routing::{IntoMakeService, get},
 };
 use delivery::AppState;
 use std::{sync::Arc, time::Duration};
 use tower::ServiceBuilder;
 use tower_http::{
-    LatencyUnit,
+    classify::ServerErrorsFailureClass,
     sensitive_headers::{SetSensitiveRequestHeadersLayer, SetSensitiveResponseHeadersLayer},
     timeout::TimeoutLayer,
-    trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
+    trace::{DefaultMakeSpan, TraceLayer},
 };
 
 pub fn apis(state: AppState) -> IntoMakeService<Router> {
@@ -25,11 +26,26 @@ pub fn apis(state: AppState) -> IntoMakeService<Router> {
         )))
         .layer(
             TraceLayer::new_for_http()
-                .on_body_chunk(|chunk: &Bytes, latency: Duration, _: &tracing::Span| {
-                    tracing::info!(size_bytes = chunk.len(), latency = ?latency, "sending body chunk")
-                })
                 .make_span_with(DefaultMakeSpan::new().include_headers(true))
-                .on_response(DefaultOnResponse::new().include_headers(true).latency_unit(LatencyUnit::Micros))
+                .on_body_chunk(|chunk: &Bytes, latency: Duration, _: &tracing::Span| {
+                    tracing::info!(size_body = chunk.len(), latency = ?latency, "sending body chunk")
+                })
+                .on_request(|request: &Request, _span: &tracing::Span| {
+                    tracing::info!("started {} {}", request.method(), request.uri().path())
+                })
+                .on_response(|response: &Response<Body>, latency: Duration, _span: &tracing::Span| {
+                    tracing::info!(status_response = ?response.status(), latency = ?latency,"response finish")
+                })
+                .on_failure(|error_response: ServerErrorsFailureClass, latency: Duration, _span: &tracing::Span| {
+                    match error_response {
+                        ServerErrorsFailureClass::StatusCode(code) => {
+                            tracing::error!(latency = ?latency, "response finish but got error with status code: {:?}", code)
+                        }
+                        ServerErrorsFailureClass::Error(error) => {
+                            tracing::error!(latency = ?latency, "response finish but got error: {:?}", error)
+                        }
+                    }
+                })
         )
         .layer(SetSensitiveResponseHeadersLayer::from_shared(
             sensitive_headers,
